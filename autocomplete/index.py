@@ -7,11 +7,12 @@ try:
 except ImportError:
     settings = {}
 
-PREFIX = settings.get('REDIS_AUTOCOMPLETE', {}).get('prefix', 'ra')
-HOST = settings.get('REDIS_AUTOCOMPLETE', {}).get('host', 'localhost')
-PORT = settings.get('REDIS_AUTOCOMPLETE', {}).get('port', 6379)
-DB = settings.get('REDIS_AUTOCOMPLETE', {}).get('db', 0)
-LIMITS = settings.get('REDIS_AUTOCOMPLETE', {}).get('limits', 5)
+autocomplete_settings = getattr(settings, 'REDIS_AUTOCOMPLETE', {})
+PREFIX = autocomplete_settings.get('prefix', 'ra')
+HOST = autocomplete_settings.get('host', 'localhost')
+PORT = autocomplete_settings.get('port', 6379)
+DB = autocomplete_settings.get('db', 0)
+LIMITS = autocomplete_settings.get('limits', 5)
 
 
 class Autocomplete(object):
