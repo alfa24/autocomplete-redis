@@ -1,112 +1,108 @@
-#-*- coding:utf-8 -*-
+import json
+
 import redis
 
 try:
-  import simplejson
-except:
-  from django.utils import simplejson
+    from django.conf import settings
+except ImportError:
+    settings = {}
 
-try:
-  from django.core import serializers
-  from django.db.models.loading import get_model
-except:
-  pass
+PREFIX = settings.get('REDIS_AUTOCOMPLETE', {}).get('prefix', 'ra')
+HOST = settings.get('REDIS_AUTOCOMPLETE', {}).get('host', 'localhost')
+PORT = settings.get('REDIS_AUTOCOMPLETE', {}).get('port', 6379)
+DB = settings.get('REDIS_AUTOCOMPLETE', {}).get('db', 0)
+LIMITS = settings.get('REDIS_AUTOCOMPLETE', {}).get('limits', 5)
 
-import mmseg
-from autocomplete.utils import queryset_iterator
 
-class Autocomplete (object):
-  """
-  autocomplete.
-  """
+class Autocomplete(object):
+    """Autocomplete"""
 
-  def __init__ (self, scope, redisaddr="localhost", limits=5, cached=True):
-    self.r = redis.Redis (redisaddr)
-    self.scope = scope
-    self.cached=cached
-    self.limits = limits
-    self.database = "database:%s" % scope
-    self.indexbase = "indexbase:%s" % scope
-    mmseg.Dictionary.load_dictionaries ()
+    def __init__(self, scope, prefix=PREFIX, host=HOST, port=PORT, db=DB, limits=LIMITS, cached=True):
+        self.r = redis.Redis(host=host, port=port, db=db)
+        self.scope = scope
+        self.cached = cached
+        self.limits = limits
+        self.database = f'{prefix}:database:{scope}'
+        self.indexbase = f'{prefix}:indexbase:{scope}'
 
-  def _get_index_key (self, key):
-    return "%s:%s" % (self.indexbase, key)
+    def _get_index_key(self, key):
+        return f'{self.indexbase}:{key}'
 
-  def del_index (self):
-    prefixs = self.r.smembers (self.indexbase)
-    for prefix in prefixs:
-      self.r.delete(self._get_index_key(prefix))
-    self.r.delete(self.indexbase)
-    self.r.delete(self.database)
+    def del_index(self):
+        prefixes = self.r.smembers(self.indexbase)
+        for prefix in prefixes:
+            self.r.delete(self._get_index_key(prefix))
+        self.r.delete(self.indexbase)
+        self.r.delete(self.database)
 
-  def sanity_check (self, item):
-    """
-    Make sure item has key that's needed.
-    """
-    for key in ("uid","term"):
-      if not item.has_key (key):
-        raise Exception ("Item should have key %s"%key )
+    @staticmethod
+    def sanity_check(item):
+        """Make sure item has key that's needed"""
 
-  def add_item (self,item):
-    """
-    Create index for ITEM.
-    """
-    self.sanity_check (item)
-    self.r.hset (self.database, item.get('uid'), simplejson.dumps(item))
-    for prefix in self.prefixs_for_term (item['term']):
-      self.r.sadd (self.indexbase, prefix)
-      self.r.zadd (self._get_index_key(prefix),item.get('uid'), item.get('score',0))
+        for key in ('uid', 'term'):
+            if key not in item:
+                raise Exception(f'Item should have key {key}')
 
-  def del_item (self,item):
-    """
-    Delete ITEM from the index
-    """
-    for prefix in self.prefixs_for_term (item['term']):
-      self.r.zrem (self._get_index_key(prefix), item.get('uid'))
-      if not self.r.zcard (self._get_index_key(prefix)):
-        self.r.delete (self._get_index_key(prefix))
-        self.r.srem (self.indexbase, prefix)
+    def add_item(self, item):
+        """Create index for ITEM"""
 
-  def update_item (self, item):
-    self.del_item (item)
-    self.add_item (item)
+        self.sanity_check(item)
+        self.r.hset(self.database, item.get('uid'), json.dumps(item))
+        for prefix in self.prefixes_for_term(item['term']):
+            self.r.sadd(self.indexbase, prefix)
+            self.r.zadd(self._get_index_key(prefix), {item.get('uid'): item.get('score', 0)})
 
-  def prefixs_for_term (self,term):
-    """
-    Get prefixs for TERM.
-    """
-    # Normalization
-    term=term.lower()
+    def del_item(self, item):
+        """Delete ITEM from the index"""
 
-    # Prefixs for term
-    prefixs=[]
-    tokens=mmseg.Algorithm(term)
-    for token in tokens:
-      word = token.text
-      for i in xrange (1,len(word)+1):
-        prefixs.append(word[:i])
+        for prefix in self.prefixes_for_term(item['term']):
+            self.r.zrem(self._get_index_key(prefix), item.get('uid'))
+            if not self.r.zcard(self._get_index_key(prefix)):
+                self.r.delete(self._get_index_key(prefix))
+                self.r.srem(self.indexbase, prefix)
 
-    return prefixs
+    def update_item(self, item):
+        self.del_item(item)
+        self.add_item(item)
 
-  def normalize (self,prefix):
-    """
-    Normalize the search string.
-    """
-    tokens = mmseg.Algorithm(prefix.lower())
-    return [token.text for token in tokens]
+    @staticmethod
+    def prefixes_for_term(term):
+        """Get prefixes for TERM"""
 
-  def search_query (self,prefix):
-    search_strings = self.normalize (prefix)
+        # Normalization
+        term = term.lower()
 
-    if not search_strings: return []
+        # Prefixes for term
+        prefixes = []
+        tokens = term.split(' ')
+        for token in tokens:
+            word = token
+            for i in range(1, len(word) + 1):
+                prefixes.append(word[:i])
 
-    cache_key = self._get_index_key (('|').join(search_strings))
+        return prefixes
 
-    if not self.cached or not self.r.exists (cache_key):
-      self.r.zinterstore (cache_key, map (lambda x: self._get_index_key(x), search_strings))
-      self.r.expire (cache_key, 10 * 60)
+    @staticmethod
+    def normalize(prefix):
+        """Normalize the search string"""
 
-    ids=self.r.zrevrange (cache_key, 0, self.limits)
-    if not ids: return ids
-    return map(lambda x:simplejson.loads(x),
-               self.r.hmget(self.database, *ids))
+        tokens = prefix.lower().split(' ')
+        return [token for token in tokens]
+
+    def search_query(self, prefix):
+        search_strings = self.normalize(prefix)
+
+        if not search_strings:
+            return []
+
+        cache_key = self._get_index_key('|'.join(search_strings))
+
+        if not self.cached or not self.r.exists(cache_key):
+            self.r.zinterstore(cache_key, [self._get_index_key(x) for x in search_strings])
+            self.r.expire(cache_key, 10 * 60)
+
+        ids = self.r.zrevrange(cache_key, 0, self.limits)
+        if not ids:
+            return ids
+
+        return self.r.hmget(self.database, *ids)
